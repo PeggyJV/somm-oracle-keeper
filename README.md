@@ -49,9 +49,23 @@ keeper — it needs a redeploy.
 
 ## Health
 
-`/healthz` returns 503 when any oracle is breached, has its kill switch
-engaged, or has failed three consecutive cycles. Alert on that, and on the
-`upkeep running late` and `LATE PAST BUDGET` log lines.
+Each chain runs as its own task and publishes its own report as soon as it
+finishes, so chains do not share a failure domain and a slow chain never hides
+another's progress.
+
+`/healthz` returns 503 when a chain has stopped reporting (`stale`), when a
+chain's evaluation exceeded `tick_timeout_secs` (`stalled`), or when any oracle
+is breached, has its kill switch engaged, or has failed three consecutive cycles
+(`degraded`).
+
+**Staleness is the load-bearing check.** Every other signal reads data a worker
+published; if a worker hangs, only staleness catches it. All three timeouts
+(`rpc_timeout_secs`, `tx_confirm_timeout_secs`, `tick_timeout_secs`) exist
+because alloy defaults to no timeout on both HTTP requests and transaction
+confirmation — an unresponsive RPC endpoint would otherwise block a worker
+indefinitely while it reported its last good readings forever.
+
+Alert on 503, and on the `upkeep running late` and `LATE PAST BUDGET` log lines.
 
 Alert on upkeep *reverts*, not just process uptime. `performUpkeep` calls
 `target.totalAssets()`, which prices positions through the PriceRouter, so a

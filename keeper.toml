@@ -24,6 +24,12 @@ expected_address = "0x187559Cfd96d41B4E1343bDc1b36362E817b2F83"
 # restarted container fires promptly rather than waiting out a long interval.
 poll_interval_secs = 300
 fire_buffer_secs   = 60
+# alloy sets no default timeout on either HTTP requests or transaction
+# confirmation, so both must be bounded here. Without them one unresponsive
+# endpoint hangs a chain worker forever.
+rpc_timeout_secs        = 30
+tx_confirm_timeout_secs = 180
+tick_timeout_secs       = 600
 
 [[chains]]
 name     = "ethereum"

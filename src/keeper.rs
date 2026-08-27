@@ -9,6 +9,7 @@ use alloy::signers::Signer;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// Live view of one oracle, published on `/status`.
@@ -50,6 +51,7 @@ pub struct ChainWorker {
     safe: Address,
     oracles: Vec<Oracle>,
     fire_buffer: u64,
+    tx_confirm_timeout: Duration,
     /// `None` in read-only mode: `status` is useful to an operator who has RPC
     /// access but no KMS permission. Held as a trait object so the Safe signing
     /// path can be exercised in tests with a local key rather than KMS.
@@ -64,7 +66,11 @@ impl ChainWorker {
             .rpc_url
             .parse()
             .with_context(|| format!("chain {}: rpc_url is not a valid URL", chain.name))?;
-        let provider = ProviderBuilder::new().connect_http(url).erased();
+        let provider = ProviderBuilder::new()
+            .with_reqwest(url, |b| {
+                b.timeout(Duration::from_secs(30)).build().expect("reqwest client")
+            })
+            .erased();
         let actual = provider.get_chain_id().await.with_context(|| {
             format!("chain {}: could not read chain id from {}", chain.name, chain.rpc_url)
         })?;
@@ -82,15 +88,20 @@ impl ChainWorker {
             safe: chain.safe,
             oracles: chain.oracles.clone(),
             fire_buffer,
+            tx_confirm_timeout: Duration::from_secs(180),
             signer: None,
         })
     }
 
-    pub async fn new(chain: &Chain, signer: &GcpSigner, fire_buffer: u64) -> Result<Self> {
+    pub async fn new(
+        chain: &Chain,
+        signer: &GcpSigner,
+        cadence: &crate::config::Cadence,
+    ) -> Result<Self> {
         let mut chain_signer = signer.clone();
         chain_signer.set_chain_id(Some(chain.chain_id));
         let wallet = EthereumWallet::from(chain_signer.clone());
-        Self::new_with(chain, wallet, Arc::new(chain_signer), fire_buffer).await
+        Self::new_with(chain, wallet, Arc::new(chain_signer), cadence).await
     }
 
     /// Shared constructor. `wallet` pays for and signs the outer transaction;
@@ -100,12 +111,20 @@ impl ChainWorker {
         chain: &Chain,
         wallet: EthereumWallet,
         signer: Arc<dyn Signer + Send + Sync>,
-        fire_buffer: u64,
+        cadence: &crate::config::Cadence,
     ) -> Result<Self> {
         let url = chain.rpc_url.parse().with_context(|| {
             format!("chain {}: rpc_url is not a valid URL", chain.name)
         })?;
-        let provider = ProviderBuilder::new().wallet(wallet).connect_http(url).erased();
+        // A request timeout is mandatory: alloy's reqwest transport sets none,
+        // so an unresponsive endpoint would block this worker forever.
+        let rpc_timeout = Duration::from_secs(cadence.rpc_timeout_secs);
+        let provider = ProviderBuilder::new()
+            .wallet(wallet)
+            .with_reqwest(url, move |b| {
+                b.timeout(rpc_timeout).build().expect("reqwest client")
+            })
+            .erased();
 
         // Fail fast on a misrouted RPC: signing for the wrong chain would
         // produce transactions that are valid somewhere we did not intend.
@@ -126,7 +145,8 @@ impl ChainWorker {
             provider,
             safe: chain.safe,
             oracles: chain.oracles.clone(),
-            fire_buffer,
+            fire_buffer: cadence.fire_buffer_secs,
+            tx_confirm_timeout: Duration::from_secs(cadence.tx_confirm_timeout_secs),
             signer: Some(signer),
         })
     }
@@ -182,6 +202,42 @@ impl ChainWorker {
             "preflight passed"
         );
         Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Statuses to publish when this chain's tick exceeded its budget. Carries
+    /// the previous readings forward but marks the failure, so a hang surfaces
+    /// as unhealthy rather than as stale-but-fine data.
+    pub fn stalled_statuses(&self, prev: &[OracleStatus]) -> Vec<OracleStatus> {
+        self.oracles
+            .iter()
+            .map(|o| {
+                let p = prev.iter().find(|p| p.address == o.address && p.chain == self.name);
+                let mut st = p.cloned().unwrap_or_else(|| OracleStatus {
+                    chain: self.name.clone(),
+                    label: o.label.clone(),
+                    address: o.address,
+                    safe_to_use: false,
+                    kill_switch: false,
+                    last_observation_ts: 0,
+                    seconds_until_due: None,
+                    lateness_secs: 0,
+                    lateness_budget_secs: 0,
+                    breached: false,
+                    target_total_supply: None,
+                    target_total_assets: None,
+                    consecutive_failures: 0,
+                    last_error: None,
+                    last_upkeep_tx: None,
+                });
+                st.consecutive_failures = st.consecutive_failures.saturating_add(1);
+                st.last_error = Some("chain tick exceeded its timeout budget".into());
+                st
+            })
+            .collect()
     }
 
     /// Evaluate every oracle on this chain once, firing upkeeps that are due.
@@ -394,7 +450,13 @@ impl ChainWorker {
             .await
             .context("submitting execTransaction")?;
 
-        let receipt = pending.get_receipt().await.context("awaiting receipt")?;
+        // Without an explicit timeout alloy never reaps the pending transaction,
+        // so a dropped or underpriced tx would hang this worker indefinitely.
+        let receipt = pending
+            .with_timeout(Some(self.tx_confirm_timeout))
+            .get_receipt()
+            .await
+            .context("awaiting execTransaction receipt")?;
         if !receipt.status() {
             bail!("execTransaction reverted in tx {:#x}", receipt.transaction_hash);
         }
@@ -402,7 +464,27 @@ impl ChainWorker {
     }
 }
 
-pub type SharedStatus = Arc<tokio::sync::RwLock<Vec<OracleStatus>>>;
+/// One chain's most recent evaluation, with the wall-clock time it completed.
+///
+/// `updated_at` exists purely so `/healthz` can detect that a worker has stopped
+/// reporting. Without it, a hung worker leaves the last good statuses in place
+/// and the service reports healthy forever while firing nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainReport {
+    pub chain: String,
+    pub updated_at: u64,
+    pub stalled: bool,
+    pub oracles: Vec<OracleStatus>,
+}
+
+pub type SharedStatus = Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, ChainReport>>>;
+
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 #[cfg(test)]
 mod live_tests {
@@ -443,7 +525,8 @@ mod live_tests {
             oracles: vec![Oracle { label: "turbo-steth".into(), address: oracle_addr }],
         };
 
-        let worker = ChainWorker::new_with(&chain, wallet, Arc::new(signer.clone()), 60)
+        let cadence = crate::config::Cadence::default();
+        let worker = ChainWorker::new_with(&chain, wallet, Arc::new(signer.clone()), &cadence)
             .await
             .expect("worker");
 
