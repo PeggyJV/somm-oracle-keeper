@@ -105,4 +105,12 @@ production signing path with a local key in place of KMS.
 ## IAM
 
 The service account needs `cloudkms.cryptoKeyVersions.viewPublicKey` (startup)
-and `cloudkms.cryptoKeyVersions.useToSign` (per upkeep).
+and `cloudkms.cryptoKeyVersions.useToSign` (per upkeep). Both are included in
+`roles/cloudkms.signerVerifier`, which is what is granted.
+
+Verified 2026-08-27 against `peggyjv-services`: key
+`somm-oracle-keeper/share-price-oracle-keeper` version 1, EC_SIGN_SECP256K1_SHA256,
+HSM, ENABLED, derives to `0x187559Cfd96d41B4E1343bDc1b36362E817b2F83` — the
+address baked into the ops Safe and every oracle's `automationForwarder`.
+`oracle-keeper@peggyjv-services.iam.gserviceaccount.com` holds
+`roles/cloudkms.signerVerifier` on it.
