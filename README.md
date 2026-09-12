@@ -6,6 +6,10 @@ Safe with a GCP KMS key.
 
 Replaces Chainlink Automation v2.1, which was decommissioned on 5 August 2026.
 
+**The full remediation plan is in [docs/RUNBOOK.md](docs/RUNBOOK.md)** — what
+broke, the deterministic addresses, who signs what, and the sequence for both
+the oracle replacement and the separate Redstone repricing track.
+
 ## Why this must not stop
 
 The oracle's TWAP window is a band, not a floor. `getLatest()` reports
