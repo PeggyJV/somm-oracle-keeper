@@ -1,5 +1,8 @@
 # Build
-FROM rust:1.96-slim AS build
+# Both stages are pinned to the same Debian release on purpose. Plain
+# `rust:1.96-slim` resolves to trixie (glibc 2.41); a binary linked there fails
+# on bookworm with `GLIBC_2.38 not found` before main() runs. Keep these in step.
+FROM rust:1.96-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev ca-certificates protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
