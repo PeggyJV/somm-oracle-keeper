@@ -1,0 +1,60 @@
+# Sommelier share-price oracle keeper.
+#
+# Addresses below are CREATE2-deterministic, fixed by the oracle initcode, so
+# they hold whenever deployment happens.
+#
+# Oracle parameters: heartbeat 43200 (12h), gracePeriod 86400 (24h),
+# observationsToUse 3 (length 4). That gives a 24h warm-up before withdrawals
+# reopen and a 12h per-interval lateness budget. ~60 upkeeps/month.
+
+[kms]
+project_id       = "peggyjv-services"
+location         = "us-central1"
+key_ring         = "somm-oracle-keeper"
+key_name         = "share-price-oracle-keeper"
+key_version      = 1
+# Startup aborts unless the KMS key derives to exactly this address. It is baked
+# into the ops Safe as owner and into every oracle as automationForwarder, and
+# neither has a setter.
+expected_address = "0x187559Cfd96d41B4E1343bDc1b36362E817b2F83"
+
+[cadence]
+# 5-minute polling against a 43200s lateness budget. Polling far more often than
+# the heartbeat is deliberate: it costs nothing (reads only) and means a
+# restarted container fires promptly rather than waiting out a long interval.
+poll_interval_secs = 300
+fire_buffer_secs   = 60
+# alloy sets no default timeout on either HTTP requests or transaction
+# confirmation, so both must be bounded here. Without them one unresponsive
+# endpoint hangs a chain worker forever.
+rpc_timeout_secs        = 30
+tx_confirm_timeout_secs = 180
+tick_timeout_secs       = 600
+
+[[chains]]
+name     = "ethereum"
+chain_id = 1
+rpc_url  = "https://ethereum-rpc.publicnode.com"
+safe     = "0xf267823cf091917b3072245566cd073833aff65b"
+oracles  = [
+  { label = "turbo-steth", address = "0x2e212d0315381da0db13e95d35d896ab697af776" },
+]
+
+[[chains]]
+name     = "arbitrum"
+chain_id = 42161
+rpc_url  = "https://arb1.arbitrum.io/rpc"
+safe     = "0xf267823cf091917b3072245566cd073833aff65b"
+oracles  = [
+  { label = "real-yield-usd", address = "0x542967ea8378226868935ea38528d2534c5d08ef" },
+  { label = "real-yield-eth", address = "0x1034ccff4713dbbb1d6444e109e49bd77195fd6c" },
+]
+
+[[chains]]
+name     = "optimism"
+chain_id = 10
+rpc_url  = "https://mainnet.optimism.io"
+safe     = "0xf267823cf091917b3072245566cd073833aff65b"
+oracles  = [
+  { label = "real-yield-eth", address = "0xe46b510c59e0551774cbb23363813eda2e80aa91" },
+]
