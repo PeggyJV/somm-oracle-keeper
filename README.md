@@ -31,7 +31,7 @@ Firing early is harmless: the contract reverts with
 
     somm-oracle-keeper verify    # check KMS key, Safe threshold/ownership, forwarder wiring
     somm-oracle-keeper status    # read-only fleet state, no KMS needed
-    somm-oracle-keeper run       # the loop, plus /healthz and /status on $PORT
+    somm-oracle-keeper run       # the loop, plus /health and /status on $PORT
 
 `verify` is safe to run at any time and sends no transactions. Run it before
 every deploy.
@@ -57,7 +57,11 @@ Each chain runs as its own task and publishes its own report as soon as it
 finishes, so chains do not share a failure domain and a slow chain never hides
 another's progress.
 
-`/healthz` returns 503 when a chain has stopped reporting (`stale`), when a
+Use `/health` for Cloud Run monitors. Cloud Run reserves some paths ending in
+`z` and [recommends avoiding that suffix](https://docs.cloud.google.com/run/docs/known-issues#reserved-url-paths).
+`/healthz` remains an alias for direct container access.
+
+`/health` returns 503 when a chain has stopped reporting (`stale`), when a
 chain's evaluation exceeded `tick_timeout_secs` (`stalled`), or when any oracle
 is breached, has its kill switch engaged, or has failed three consecutive cycles
 (`degraded`).
