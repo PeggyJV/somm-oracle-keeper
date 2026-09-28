@@ -142,10 +142,7 @@ async fn run(cfg: Config, signer: GcpSigner, port: u16) -> Result<()> {
         cfg.cadence.poll_interval_secs + cfg.cadence.tick_timeout_secs * 2;
     let tick_budget = Duration::from_secs(cfg.cadence.tick_timeout_secs);
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/status", get(status_handler))
-        .with_state(HealthState { status: status.clone(), stale_after });
+    let app = health_router(HealthState { status: status.clone(), stale_after });
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     info!(port, "health server listening");
     tokio::spawn(async move {
@@ -227,6 +224,14 @@ struct HealthState {
     stale_after: u64,
 }
 
+fn health_router(state: HealthState) -> Router {
+    Router::new()
+        .route("/health", get(healthz))
+        .route("/healthz", get(healthz))
+        .route("/status", get(status_handler))
+        .with_state(state)
+}
+
 /// Pure health decision, split out so it can be tested without a server.
 ///
 /// Order matters: staleness is checked first because it is the only signal that
@@ -300,6 +305,57 @@ mod health_tests {
             ChainReport { chain: "ethereum".into(), updated_at, stalled, oracles: vec![o] },
         );
         m
+    }
+
+    #[tokio::test]
+    async fn health_routes_preserve_status_codes_and_bodies() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+
+        let now = now_unix();
+        let cases = [
+            (BTreeMap::new(), StatusCode::OK, "starting"),
+            (reports(now, false, oracle(0, false)), StatusCode::OK, "ok"),
+            (
+                reports(now - STALE_AFTER - 1, false, oracle(0, false)),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stale",
+            ),
+            (
+                reports(now, true, oracle(0, false)),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stalled",
+            ),
+            (
+                reports(now, false, oracle(0, true)),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "degraded",
+            ),
+            (
+                reports(now, false, oracle(3, false)),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "degraded",
+            ),
+        ];
+        for (reports, expected_code, expected_body) in cases {
+            let app = health_router(HealthState {
+                status: Arc::new(tokio::sync::RwLock::new(reports)),
+                stale_after: STALE_AFTER,
+            });
+            for path in ["/health", "/healthz"] {
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected_code, "{path}: {expected_body}");
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(body.as_ref(), expected_body.as_bytes(), "{path}");
+            }
+        }
     }
 
     const STALE_AFTER: u64 = 1500;

@@ -323,7 +323,11 @@ every RPC's chain id matches config, each Safe has threshold 1 with the signer a
 an owner, and every oracle's `automationForwarder` is that Safe. All of those are
 immutable post-deployment, so failing at boot beats failing one upkeep at a time.
 
-`/healthz` returns 503 on staleness, a timed-out tick, a breach, an engaged kill
+Use `/health` for Cloud Run monitors. Cloud Run reserves some paths ending in
+`z` and [recommends avoiding that suffix](https://docs.cloud.google.com/run/docs/known-issues#reserved-url-paths).
+`/healthz` remains an alias for direct container access.
+
+`/health` returns 503 on staleness, a timed-out tick, a breach, an engaged kill
 switch, or three consecutive failures. **Alert on upkeep reverts, not just
 process uptime** — `performUpkeep` calls `totalAssets()`, so a stale third-party
 feed reverts the upkeep while the keeper itself looks healthy.
