@@ -119,7 +119,14 @@ impl ChainWorker {
         // A request timeout is mandatory: alloy's reqwest transport sets none,
         // so an unresponsive endpoint would block this worker forever.
         let rpc_timeout = Duration::from_secs(cadence.rpc_timeout_secs);
+        // Each chain submits sequentially. Fetch the node's pending nonce on
+        // every attempt: the default cached manager advances before submission
+        // and leaves a nonce gap after an estimation or broadcast failure.
         let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .with_gas_estimation()
+            .with_simple_nonce_management()
+            .fetch_chain_id()
             .wallet(wallet)
             .with_reqwest(url, move |b| {
                 b.timeout(rpc_timeout).build().expect("reqwest client")
@@ -450,6 +457,11 @@ impl ChainWorker {
             .await
             .context("submitting execTransaction")?;
 
+        info!(
+            chain = %self.name, oracle = %o.label, tx = %pending.tx_hash(),
+            "upkeep submitted"
+        );
+
         // Without an explicit timeout alloy never reaps the pending transaction,
         // so a dropped or underpriced tx would hang this worker indefinitely.
         let receipt = pending
@@ -554,6 +566,99 @@ mod live_tests {
             s.last_upkeep_tx.as_deref().unwrap(),
             idx,
             obs.timestamp
+        );
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use alloy::consensus::{Transaction, TxEnvelope};
+    use alloy::eips::Decodable2718;
+    use alloy::rpc::types::TransactionRequest;
+    use alloy::signers::local::PrivateKeySigner;
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::{json, Value};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RpcState {
+        submitted_nonces: Vec<u64>,
+        pending_nonce: u64,
+    }
+
+    async fn rpc(State(state): State<Arc<Mutex<RpcState>>>, Json(req): Json<Value>) -> Json<Value> {
+        let mut state = state.lock().unwrap();
+        let result = match req["method"].as_str().unwrap() {
+            "eth_chainId" => json!("0xa"),
+            "eth_getTransactionCount" => {
+                assert_eq!(req["params"][1], "pending");
+                json!(format!("{:#x}", state.pending_nonce))
+            }
+            "eth_sendRawTransaction" => {
+                let bytes: Bytes = req["params"][0].as_str().unwrap().parse().unwrap();
+                let tx = TxEnvelope::decode_2718(&mut bytes.as_ref()).unwrap();
+                state.submitted_nonces.push(tx.nonce());
+                if state.submitted_nonces.len() == 1 {
+                    return Json(json!({
+                        "jsonrpc": "2.0", "id": req["id"],
+                        "error": {"code": -32000, "message": "backend unavailable"}
+                    }));
+                }
+                state.pending_nonce = tx.nonce() + 1;
+                json!(tx.tx_hash())
+            }
+            method => panic!("unexpected RPC method: {method}"),
+        };
+        Json(json!({"jsonrpc": "2.0", "id": req["id"], "result": result}))
+    }
+
+    // Reintroducing Alloy's cached nonce filler makes the retry skip nonce 97
+    // even though the failed broadcast never reached the node's pending pool.
+    #[tokio::test]
+    async fn failed_submission_retries_the_nodes_pending_nonce() {
+        let state = Arc::new(Mutex::new(RpcState {
+            pending_nonce: 97,
+            ..Default::default()
+        }));
+        let app = Router::new()
+            .route("/", post(rpc))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let signer = PrivateKeySigner::random();
+        let wallet = EthereumWallet::from(signer.clone());
+        let chain = Chain {
+            name: "optimism".into(),
+            chain_id: 10,
+            rpc_url: format!("http://{addr}"),
+            safe: Address::repeat_byte(1),
+            oracles: vec![],
+        };
+        let worker = ChainWorker::new_with(
+            &chain,
+            wallet,
+            Arc::new(signer),
+            &crate::config::Cadence::default(),
+        )
+        .await
+        .unwrap();
+        // Supply gas fields so this isolates failed broadcast from estimation.
+        let tx = TransactionRequest::default()
+            .to(chain.safe)
+            .gas_limit(100_000)
+            .max_fee_per_gas(2_000_000_000)
+            .max_priority_fee_per_gas(1_000_000_000);
+        let first = worker.provider.send_transaction(tx.clone()).await;
+        assert!(first.is_err(), "the first broadcast must fail");
+        let _ = worker.provider.send_transaction(tx.clone()).await.unwrap();
+        let _ = worker.provider.send_transaction(tx).await.unwrap();
+        server.abort();
+        assert_eq!(
+            state.lock().unwrap().submitted_nonces,
+            [97, 97, 98],
+            "retry must reuse an unsubmitted nonce and follow the node after acceptance",
         );
     }
 }
