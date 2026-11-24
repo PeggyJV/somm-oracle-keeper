@@ -39,8 +39,8 @@ safe     = "0xf267823cf091917b3072245566cd073833aff65b"
 oracles  = [
   { label = "turbo-steth", address = "0x2e212d0315381da0db13e95d35d896ab697af776" },
   # Added 2026-11-20: recovery keeper oracles (registry ids 28-38, deployed by 0x096C at nonces 446-456).
-  # turbo-eeth (0x6e7624a1b0ae96e9cb36b7c591b4f67b55797c8a, id 30) is left out until turbo-eethv2's oracle is
-  # safe and set on turbo-eethv2: before then its performUpkeep reverts (Cellar__OracleFailure) on every poll.
+  # turbo-eeth (id 30) prices its eethv2 shares, so it was added after turbo-eethv2's oracle became safe (2026-11-24).
+  { label = "turbo-eeth", address = "0x6e7624a1b0ae96e9cb36b7c591b4f67b55797c8a" },
   { label = "turbo-gho", address = "0x6e86acbe08e0478b04b117d6f75898102fa525f1" },
   { label = "turbo-eethv2", address = "0xc5d1ad745bdab3d8a1b367511bc075ed20e26464" },
   { label = "turbo-ethx", address = "0xb8f8bb43af3f5a46ce288a7b98f5c65b43b33649" },
